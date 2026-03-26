@@ -1,0 +1,30 @@
+{
+  "input": "samples\\DG01A_May2026.dxf",
+  "output": "samples\\DG01A_May2026_healed.stl",
+  "before": {
+    "vertices": 1194090,
+    "faces": 398030,
+    "watertight": false,
+    "winding_consistent": true,
+    "euler_number": 398030,
+    "volume": -3060241717.3097687,
+    "area": 96154047.24364436,
+    "degenerate_faces": 0,
+    "duplicate_faces": 0,
+    "nonmanifold_edges": 0,
+    "boundary_edges": 1194090
+  },
+  "after": {
+    "vertices": 154141,
+    "faces": 308358,
+    "watertight": true,
+    "winding_consistent": true,
+    "euler_number": -38,
+    "volume": 2894337106.9179597,
+    "area": 87530505.72928211,
+    "degenerate_faces": 0,
+    "duplicate_faces": 0,
+    "nonmanifold_edges": 0,
+    "boundary_edges": 0
+  }
+}

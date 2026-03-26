@@ -1,0 +1,46 @@
+{
+  "mode": "boolean",
+  "operation": "clip",
+  "left_input": "samples\\boolean_left.stl",
+  "right_input": "samples\\boolean_right.stl",
+  "output": "samples\\boolean_clip.stl",
+  "left": {
+    "vertices": 8,
+    "faces": 12,
+    "watertight": true,
+    "winding_consistent": true,
+    "euler_number": 2,
+    "volume": 1.0,
+    "area": 6.0,
+    "degenerate_faces": 0,
+    "duplicate_faces": 0,
+    "nonmanifold_edges": 0,
+    "boundary_edges": 0
+  },
+  "right": {
+    "vertices": 8,
+    "faces": 12,
+    "watertight": true,
+    "winding_consistent": true,
+    "euler_number": 2,
+    "volume": 1.0,
+    "area": 6.0,
+    "degenerate_faces": 0,
+    "duplicate_faces": 0,
+    "nonmanifold_edges": 0,
+    "boundary_edges": 0
+  },
+  "result": {
+    "vertices": 8,
+    "faces": 12,
+    "watertight": true,
+    "winding_consistent": true,
+    "euler_number": 2,
+    "volume": 0.5,
+    "area": 4.0,
+    "degenerate_faces": 0,
+    "duplicate_faces": 0,
+    "nonmanifold_edges": 0,
+    "boundary_edges": 0
+  }
+}

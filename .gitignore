@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.dxf
+*.msh
+*.00t
+
+mesh_heal_progress_*/
+
+.DS_Store
+Thumbs.db
