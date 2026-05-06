@@ -5,6 +5,10 @@ __pycache__/
 *.msh
 *.00t
 
+advanced_backends/**/build/
+samples/*_report.json
+samples/*_report_ledger.tsv
+
 mesh_heal_progress_*/
 
 .DS_Store

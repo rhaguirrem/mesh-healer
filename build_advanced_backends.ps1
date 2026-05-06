@@ -1,10 +1,11 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Builds OpenMeshCraft (Arrangements + CDT) and fTetWild from source on Windows.
+    Builds the CGAL sidecar plus optional external backends from source on Windows.
 
 .DESCRIPTION
     1. Installs prerequisites via winget (Git, CMake, VS 2022 Build Tools)
+    2. Builds the local CGAL sidecar -> mesh_heal_cgal_alpha_wrap.exe
     2. Clones and builds OpenMeshCraft -> OpenMeshCraft-Arrangements.exe, OpenMeshCraft-CDT.exe
     3. Clones and builds fTetWild       -> FloatTetwild_bin.exe
     4. Copies binaries to $ToolsDir and sets persistent environment variables.
@@ -31,6 +32,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$RepoRoot = Split-Path -Parent $PSCommandPath
 
 function Write-Step($msg) { Write-Host "`n========== $msg ==========" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
@@ -48,7 +50,7 @@ function Refresh-Path {
 # ---------------------------------------------------------------------------
 # 1. Prerequisites
 # ---------------------------------------------------------------------------
-Write-Step "1/6  Checking & installing prerequisites"
+Write-Step "1/7  Checking & installing prerequisites"
 
 if (-not $SkipPrereqs) {
     # Git
@@ -98,7 +100,7 @@ if (-not $SkipPrereqs) {
 # ---------------------------------------------------------------------------
 # 2. Prepare directories
 # ---------------------------------------------------------------------------
-Write-Step "2/6  Preparing directories"
+Write-Step "2/7  Preparing directories"
 New-Item -ItemType Directory -Force -Path $ToolsDir  | Out-Null
 New-Item -ItemType Directory -Force -Path $SourceDir | Out-Null
 Write-Ok "Tools  -> $ToolsDir"
@@ -128,7 +130,7 @@ Import-VsDevEnv
 # ---------------------------------------------------------------------------
 # 3. Install vcpkg & Boost (if no BoostRoot provided)
 # ---------------------------------------------------------------------------
-Write-Step "3/6  Setting up vcpkg & dependencies"
+Write-Step "3/7  Setting up vcpkg & dependencies"
 $vcpkgDir = Join-Path $SourceDir "vcpkg"
 if (-not (Test-Path (Join-Path $vcpkgDir "vcpkg.exe"))) {
     Write-Host "  Cloning vcpkg ..."
@@ -158,9 +160,37 @@ Write-Host "  Installing Eigen3, CGAL, TBB via vcpkg ..."
 Write-Ok "Eigen3/CGAL/TBB installed"
 
 # ---------------------------------------------------------------------------
-# 4. Build OpenMeshCraft
+# 4. Build the local CGAL sidecar
 # ---------------------------------------------------------------------------
-Write-Step "4/6  Building OpenMeshCraft"
+Write-Step "4/7  Building CGAL sidecar"
+$cgalSrc = Join-Path $RepoRoot "advanced_backends\cgal_alpha_wrap"
+if (-not (Test-Path (Join-Path $cgalSrc "CMakeLists.txt"))) {
+    throw "CGAL sidecar source not found at $cgalSrc. Run this script from the cloned workspace."
+}
+
+$cgalBuild = Join-Path $cgalSrc "build"
+New-Item -ItemType Directory -Force -Path $cgalBuild | Out-Null
+
+Write-Host "  Configuring mesh_heal_cgal_alpha_wrap ..."
+cmake -S $cgalSrc -B $cgalBuild -G "Ninja" `
+    -DCMAKE_BUILD_TYPE=Release `
+    "-DCMAKE_TOOLCHAIN_FILE=$vcpkgToolchain"
+if ($LASTEXITCODE -ne 0) { throw "CGAL sidecar CMake configuration failed." }
+
+Write-Host "  Building mesh_heal_cgal_alpha_wrap ..."
+cmake --build $cgalBuild --config Release --target mesh_heal_cgal_alpha_wrap
+if ($LASTEXITCODE -ne 0) { throw "CGAL sidecar build failed." }
+
+$cgalExe = Get-ChildItem -Path $cgalBuild -Recurse -Filter "mesh_heal_cgal_alpha_wrap.exe" | Select-Object -First 1
+if (-not $cgalExe) { throw "mesh_heal_cgal_alpha_wrap.exe not found in build output." }
+
+Copy-Item $cgalExe.FullName -Destination $ToolsDir -Force
+Write-Ok "mesh_heal_cgal_alpha_wrap.exe -> $ToolsDir"
+
+# ---------------------------------------------------------------------------
+# 5. Build OpenMeshCraft
+# ---------------------------------------------------------------------------
+Write-Step "5/7  Building OpenMeshCraft"
 $omcSrc = Join-Path $SourceDir "OpenMeshCraft"
 if (-not (Test-Path $omcSrc)) {
     git clone --recursive https://github.com/mangoleaves/OpenMeshCraft.git $omcSrc
@@ -208,9 +238,9 @@ Write-Ok "OpenMeshCraft-Arrangements.exe -> $ToolsDir"
 Write-Ok "OpenMeshCraft-CDT.exe -> $ToolsDir"
 
 # ---------------------------------------------------------------------------
-# 5. Build fTetWild
+# 6. Build fTetWild
 # ---------------------------------------------------------------------------
-Write-Step "5/6  Building fTetWild"
+Write-Step "6/7  Building fTetWild"
 $ftetSrc = Join-Path $SourceDir "fTetWild"
 if (-not (Test-Path $ftetSrc)) {
     git clone --recursive https://github.com/wildmeshing/fTetWild.git $ftetSrc
@@ -256,14 +286,16 @@ if (Test-Path $vcpkgBinDir) {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Set environment variables (User scope, persistent)
+# 7. Set environment variables (User scope, persistent)
 # ---------------------------------------------------------------------------
-Write-Step "6/6  Setting environment variables"
+Write-Step "7/7  Setting environment variables"
 
+$cgalExePath = Join-Path $ToolsDir "mesh_heal_cgal_alpha_wrap.exe"
 $arrExePath = Join-Path $ToolsDir "OpenMeshCraft-Arrangements.exe"
 $cdtExePath = Join-Path $ToolsDir "OpenMeshCraft-CDT.exe"
 $ftetExePath = Join-Path $ToolsDir "FloatTetwild_bin.exe"
 
+[Environment]::SetEnvironmentVariable("CGAL_ALPHA_WRAP_EXE",            $cgalExePath, "User")
 [Environment]::SetEnvironmentVariable("OPENMESHCRAFT_ARRANGEMENTS_EXE", $arrExePath, "User")
 [Environment]::SetEnvironmentVariable("OPENMESHCRAFT_CDT_EXE",          $cdtExePath,  "User")
 [Environment]::SetEnvironmentVariable("FASTTETWILD_EXE",                $ftetExePath, "User")
@@ -276,11 +308,13 @@ if ($userPath -notlike "*$ToolsDir*") {
 }
 
 # Set for current session too
+$env:CGAL_ALPHA_WRAP_EXE          = $cgalExePath
 $env:OPENMESHCRAFT_ARRANGEMENTS_EXE = $arrExePath
 $env:OPENMESHCRAFT_CDT_EXE          = $cdtExePath
 $env:FASTTETWILD_EXE                = $ftetExePath
 $env:Path                          += ";$ToolsDir"
 
+Write-Ok "CGAL_ALPHA_WRAP_EXE          = $cgalExePath"
 Write-Ok "OPENMESHCRAFT_ARRANGEMENTS_EXE = $arrExePath"
 Write-Ok "OPENMESHCRAFT_CDT_EXE          = $cdtExePath"
 Write-Ok "FASTTETWILD_EXE                = $ftetExePath"
@@ -297,6 +331,7 @@ Write-Host @"
   Restart your terminal/IDE to pick up the new PATH.
 
   To verify:
+        mesh_heal_cgal_alpha_wrap.exe --help
     OpenMeshCraft-Arrangements.exe --help
     OpenMeshCraft-CDT.exe --help
     FloatTetwild_bin.exe --help

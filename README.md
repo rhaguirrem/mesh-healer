@@ -1,64 +1,66 @@
 # Mesh Heal
 
-Desktop and CLI app to detect, heal, and combine triangulated solids.
+Desktop and CLI app to detect, heal, and combine triangulated meshes.
 
-It uses existing geometry libraries instead of custom kernels:
+It uses existing geometry libraries instead of a custom kernel:
 - `trimesh`
 - `manifold3d` as the primary solid boolean backend
 - `pymeshfix` (MeshFix)
 - `pyvista` / VTK as a fallback boolean backend
-- `ezdxf` for DXF 3DFACE ingestion
+- `ezdxf` for DXF 3DFACE and POLYFACE ingestion
 - `PySide6` for the desktop GUI
 - `pyvistaqt` for optional embedded 3D preview
 
-## What it detects
-
-- Overlapped/duplicate triangles
-- Degenerate triangles
-- Non-manifold edges
-- Boundary edges (open holes)
-- Watertightness and winding consistency
-
 ## Supported inputs
 
-- DXF with triangulated `3DFACE` entities
+- DXF with triangulated `3DFACE` or `POLYFACE` entities
 - Leapfrog / ARANZ binary `.msh`
-- STL, OBJ, PLY and other mesh formats supported by `trimesh`
+- STL, OBJ, PLY, and other mesh formats supported by `trimesh`
+
+DXF files that contain only unsupported `POLYLINE` geometry are recognized and skipped with a structured skip report instead of failing the whole run.
 
 ## Supported outputs
 
-- DXF written as triangulated `3DFACE` entities
-	- exported as connected `POLYFACE` when writing DXF
+- DXF written as triangulated `POLYFACE`
 - Leapfrog / ARANZ binary `.msh`
-- STL, OBJ, PLY, VTK and other formats supported by `trimesh`
+- STL, OBJ, PLY, VTK, and other formats supported by `trimesh`
+
+## Guided heal workflow
+
+The current workflow is intentionally narrow:
+
+1. Load a mesh.
+2. Declare whether the result is meant to stay open or become closed.
+3. Optionally load external problem hints for bad points, edges, or triangles.
+4. Rebuild locally from the problematic regions first.
+5. After each local repair stage, sanitize duplicate and degenerate triangles before continuing.
+6. If the mesh is meant to be solid, bias the pipeline toward watertight closure.
+
+This is the primary workflow in both the GUI and CLI.
+
+Manual Repair and Autoresearch are deprecated. OpenMeshCraft backends are also deprecated.
 
 ## Healing strategy
 
-1. Remove duplicate triangles
-2. Remove degenerate triangles
-3. Merge near-identical vertices
-4. Split disconnected solids and heal each component independently
-5. Run optional cleanup passes from installed mesh libraries
-6. Run MeshFix repair
-7. Fix normals and fill remaining small holes
-8. Run a final sanitation pass to remove any duplicate or degenerate triangles introduced during repair
-9. If multiple healed solids remain and each is watertight, union them before export so overlapping components do not survive as stacked triangles
-10. Write the cleaned output mesh file
+The core pipeline performs these stages:
 
-Optional heal mode:
-- Rebuild the input triangle by triangle before repair, union coplanar triangle patches in 2D, and retriangulate them back into 3D before the normal repair pass
-- Experimental localized self-intersection repair preprocesses the mesh, detects intersecting triangle regions, repairs those regions independently, and stitches them back into the global cleanup pass
-- Optional watertight repair attempts to close open boundaries and fill holes before export
-- Optional surface-only return mode stops after watertight repair and exports that repaired surface directly
-- Advanced external backend mode can run OpenMeshCraft arrangements first, then pass the exact surface through either FastTetWild or OpenMeshCraft CDT before the normal cleanup pass
+1. Remove duplicate triangles.
+2. Remove degenerate triangles.
+3. Merge near-identical vertices.
+4. Rebuild triangle soup locally when hints or rebuild mode request it.
+5. Run optional local repair passes such as non-manifold edge repair or localized self-intersection repair.
+6. Sanitize the intermediate mesh after each local stage.
+7. Heal disconnected components.
+8. Optionally attempt watertight closure.
+9. Run a final sanitation pass and fix normals.
 
-## Boolean operations
-
-- `union`
-- `intersection`
-- `clip` (`left - right`)
-
-Boolean operations use `manifold3d` through `trimesh` when available, with a VTK fallback through `pyvista`.
+Optional modes:
+- Triangle rebuild from external problem hints.
+- Experimental non-manifold edge sleeve repair.
+- Experimental localized self-intersection repair.
+- Optional distance-hull generation.
+- Optional watertight repair.
+- Optional CGAL Alpha Wrap fallback.
 
 ## Install
 
@@ -67,123 +69,107 @@ uv venv
 uv pip install -r requirements.txt
 ```
 
-## Usage
+## CLI usage
+
+Default heal run:
 
 ```bash
 uv run python mesh_heal.py input.dxf healed.stl --report report.json
 ```
 
-Legacy CLI usage without a subcommand still maps to `heal`.
-
-### Explicit heal command
+Explicit intended solid:
 
 ```bash
-uv run python mesh_heal.py heal input.dxf healed.stl --report report.json
+uv run python mesh_heal.py heal input.dxf healed.msh --intended-mesh-type solid --report heal_report.json
 ```
 
-To enable the triangle-by-triangle rebuild filter:
+Guided rebuild from one or more external hint files:
 
 ```bash
-uv run python mesh_heal.py heal input.dxf healed.stl --rebuild-triangles --report report.json
+uv run python mesh_heal.py heal input.dxf healed.msh --intended-mesh-type solid --hints leapfrog_hints_a.json leapfrog_hints_b.dxf --report heal_report.json
 ```
 
-To enable the experimental localized self-intersection pass:
+Localized self-intersection repair:
 
 ```bash
 uv run python mesh_heal.py heal input.dxf healed.stl --localized-intersection-repair --report report.json
 ```
 
-To attempt hole filling and watertight closure:
+Non-manifold edge sleeve repair:
+
+```bash
+uv run python mesh_heal.py heal input.dxf healed.stl --nonmanifold-edge-repair --report report.json
+```
+
+Explicit watertight repair:
 
 ```bash
 uv run python mesh_heal.py heal input.dxf healed.stl --make-watertight --report report.json
 ```
 
-To stop after watertight repair and export the repaired surface directly:
+Distance hull:
+
+```bash
+uv run python mesh_heal.py heal input.dxf distance_hull.stl --distance-model distance-hull --distance-offset 2.5 --report report.json
+```
+
+Surface return after watertight repair:
 
 ```bash
 uv run python mesh_heal.py heal input.dxf healed.stl --return-surface-after-watertight --report report.json
 ```
 
-To run the advanced exact plus tetrahedral backend path:
+The deprecated `autoresearch` command still parses, but now returns a structured deprecation report instead of running candidate search.
 
-```bash
-uv run python mesh_heal.py heal input.dxf healed.stl --advanced-backend omc-ftetwild --exact-arrangements-exe C:/tools/OpenMeshCraft-Arrangements.exe --tetra-backend-exe C:/tools/FloatTetwild_bin.exe --report report.json
-```
+## Advanced backends
 
 Supported advanced backends:
 - `none`
-- `omc-ftetwild` for OpenMeshCraft arrangements followed by FastTetWild
-- `omc-cdt` for OpenMeshCraft arrangements followed by OpenMeshCraft CDT
+- `cgal-alpha-wrap`
+- `cgal-repair`
 
-The advanced backends are not bundled with this project. They require external builds and executables:
-- OpenMeshCraft arrangements executable: `OpenMeshCraft-Arrangements`
-- OpenMeshCraft CDT executable: `OpenMeshCraft-CDT`
-- FastTetWild executable: `FloatTetwild_bin`
+OpenMeshCraft backends are deprecated and should not be used for new repair runs.
 
-You can either pass executable paths on the command line or set environment variables:
-- `OPENMESHCRAFT_ARRANGEMENTS_EXE`
-- `OPENMESHCRAFT_CDT_EXE`
-- `FASTTETWILD_EXE`
-
-Output format is inferred from the output extension. For example:
+CGAL Alpha Wrap example:
 
 ```bash
-uv run python mesh_heal.py heal input.msh healed.dxf
-uv run python mesh_heal.py heal input.dxf healed.msh
+uv run python mesh_heal.py heal input.dxf healed.stl --advanced-backend cgal-alpha-wrap --cgal-backend-exe C:/tools/mesh_heal_cgal_alpha_wrap.exe --report report.json
 ```
 
-### Boolean command
+CGAL repair example:
+
+```bash
+uv run python mesh_heal.py heal input.dxf healed.stl --advanced-backend cgal-repair --cgal-backend-exe C:/tools/mesh_heal_cgal_alpha_wrap.exe --report report.json
+```
+
+The CGAL sidecar project lives in `advanced_backends/cgal_alpha_wrap` and builds with CMake against a local CGAL installation.
+
+On Windows, `build_advanced_backends.ps1` can provision the optional backend toolchain and build `mesh_heal_cgal_alpha_wrap.exe` into `C:\Tools\MeshHealBackends`.
+
+You can either pass the executable path on the command line or set:
+- `CGAL_ALPHA_WRAP_EXE`
+
+Confirm CGAL package licensing before redistributing that backend.
+
+## Boolean operations
+
+Supported operations:
+- `union`
+- `intersection`
+- `clip` (`left - right`)
+
+Example:
 
 ```bash
 uv run python mesh_heal.py boolean left.stl right.stl result.stl --operation union --report boolean_report.json
 ```
 
-### GUI
+Boolean operations use `manifold3d` through `trimesh` when available, with a VTK fallback through `pyvista`.
+
+## GUI
 
 ```bash
 uv run python mesh_heal_gui.py
 ```
 
-The GUI has two tabs:
-- `Heal` for single-solid cleanup and repair
-- `Boolean` for union, intersection, and clip across one ordered list of solids, including batch runs with multiple operations selected at once
-
-The Heal tab also includes an experimental localized self-intersection repair option and advanced external backend selectors for meshes where a global MeshFix-style pass is not enough.
-
-In the GUI Heal tab, choosing an input file auto-fills the output path with the same filename plus `_healed` in the same folder by default.
-
-When a heal input contains multiple disconnected solids, the tool keeps them separated during repair, heals each one independently, and writes them back together into the same output file.
-
-When the GUI Boolean tab runs multiple operations in one pass, it writes suffixed outputs such as `result_union.stl`, `result_intersection.stl`, and matching report files.
-
-The GUI Boolean tab lets you add files iteratively from different folders into one ordered list.
-
-For Boolean operations in the GUI:
-- `union` unions all solids in the list
-- `intersection` intersects all solids in the list
-- `clip` uses the first solid as the base and subtracts each following solid in order
-
-The GUI also includes a manual 3D preview pane:
-- Preview is opt-in and never auto-loads
-- Preview loading happens in a worker thread so the UI stays responsive
-- Large meshes are decimated to a bounded preview size before rendering
-- Very large files are skipped instead of forcing an unsafe preview load
-
-## Notes for DXF
-
-- DXF loader reads triangulated `3DFACE` entities and `POLYFACE` meshes.
-- DXF export writes a connected `POLYFACE` mesh instead of isolated `3DFACE` entities.
-- `POLYLINE` polygon meshes other than `POLYFACE` are rejected with a clear error message for now.
-- If your DXF uses other entity types for surfaces, pre-convert to triangulated faces.
-
-## Notes for MSH
-
-- `.msh` support targets Leapfrog / ARANZ binary meshes with `Location Double 3` and `Tri Integer 3` blocks.
-- Unsupported `.msh` variants fail with an explicit parse error.
-
-## Notes for Maptek Vulcan
-
-- `.00t` load/save is not implemented.
-- There is no suitable free public library or documented specification available in this workspace to support `.00t` safely.
-- If you need `.00t`, the practical path is a proprietary Maptek Vulcan SDK or an external conversion step into DXF / MSH / STL.
+The GUI now opens directly into the Heal window with an embedded preview pane. The main supported flow is guided healing, not manual mesh editing.
