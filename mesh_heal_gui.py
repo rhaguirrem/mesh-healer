@@ -1,3 +1,4 @@
+import csv
 import json
 import importlib
 import multiprocessing
@@ -1583,6 +1584,10 @@ class SurfaceShellBatchTab(BaseOperationTab):
 
         self.add_files_button = QPushButton("Add Files...")
         self.add_files_button.clicked.connect(self.add_files)
+        self.load_csv_button = QPushButton("Load CSV...")
+        self.load_csv_button.clicked.connect(self.load_csv)
+        self.save_csv_button = QPushButton("Save CSV...")
+        self.save_csv_button.clicked.connect(self.save_csv)
         self.remove_selected_button = QPushButton("Remove Selected")
         self.remove_selected_button.clicked.connect(self.remove_selected)
         self.clear_button = QPushButton("Clear")
@@ -1592,6 +1597,8 @@ class SurfaceShellBatchTab(BaseOperationTab):
         list_buttons_layout = QVBoxLayout(list_buttons)
         list_buttons_layout.setContentsMargins(0, 0, 0, 0)
         list_buttons_layout.addWidget(self.add_files_button)
+        list_buttons_layout.addWidget(self.load_csv_button)
+        list_buttons_layout.addWidget(self.save_csv_button)
         list_buttons_layout.addWidget(self.remove_selected_button)
         list_buttons_layout.addWidget(self.clear_button)
         list_buttons_layout.addStretch(1)
@@ -1604,6 +1611,7 @@ class SurfaceShellBatchTab(BaseOperationTab):
 
         self.default_offset_edit = QLineEdit("1.0")
         self.apply_offset_edit = QLineEdit("1.0")
+        self.apply_offset_edit.returnPressed.connect(self.apply_selected_offset)
         self.apply_offset_button = QPushButton("Apply To Selected")
         self.apply_offset_button.clicked.connect(self.apply_selected_offset)
 
@@ -1671,6 +1679,8 @@ class SurfaceShellBatchTab(BaseOperationTab):
             self.selected_meshes_label,
             self.items_tree,
             self.add_files_button,
+            self.load_csv_button,
+            self.save_csv_button,
             self.remove_selected_button,
             self.clear_button,
             self.default_offset_edit,
@@ -1693,6 +1703,74 @@ class SurfaceShellBatchTab(BaseOperationTab):
         if directory:
             self.output_directory_edit.setText(directory)
 
+    def csv_filter(self) -> str:
+        return "CSV Files (*.csv);;All Files (*.*)"
+
+    def add_item_row(self, input_path: str, offset_text: str) -> None:
+        item = QTreeWidgetItem([input_path, offset_text, ""])
+        self.items_tree.addTopLevelItem(item)
+
+    def load_csv(self):
+        start_dir = self.output_directory_edit.text().strip()
+        csv_path, _ = QFileDialog.getOpenFileName(self, "Load batch CSV", start_dir, self.csv_filter())
+        if not csv_path:
+            return
+
+        try:
+            rows = []
+            with open(csv_path, "r", newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                if reader.fieldnames is None:
+                    raise ValueError("CSV file is missing a header row.")
+
+                normalized_fields = {field.strip().lower(): field for field in reader.fieldnames}
+                path_field = normalized_fields.get("input_path") or normalized_fields.get("input") or normalized_fields.get("mesh")
+                offset_field = normalized_fields.get("distance_offset") or normalized_fields.get("offset")
+                if path_field is None or offset_field is None:
+                    raise ValueError("CSV must contain input_path/input/mesh and distance_offset/offset columns.")
+
+                for row_index, row in enumerate(reader, start=2):
+                    input_path = str(row.get(path_field, "")).strip()
+                    offset_text = str(row.get(offset_field, "")).strip()
+                    if not input_path:
+                        raise ValueError(f"CSV row {row_index} is missing an input path.")
+                    offset_value = mesh_heal.format_surface_shell_offset_token(float(offset_text))
+                    rows.append((input_path, offset_value))
+        except Exception as exc:
+            QMessageBox.warning(self, "Invalid CSV", f"Could not load batch CSV.\n\n{exc}")
+            return
+
+        self.items_tree.clear()
+        for input_path, offset_value in rows:
+            self.add_item_row(input_path, offset_value)
+        self.refresh_output_paths()
+
+    def save_csv(self):
+        if self.items_tree.topLevelItemCount() == 0:
+            QMessageBox.warning(self, "Nothing to save", "Add at least one batch row before exporting CSV.")
+            return
+
+        start_dir = self.output_directory_edit.text().strip()
+        csv_path, _ = QFileDialog.getSaveFileName(self, "Save batch CSV", start_dir, self.csv_filter())
+        if not csv_path:
+            return
+
+        try:
+            with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["input_path", "distance_offset"])
+                writer.writeheader()
+                for index in range(self.items_tree.topLevelItemCount()):
+                    item = self.items_tree.topLevelItem(index)
+                    writer.writerow(
+                        {
+                            "input_path": item.text(0),
+                            "distance_offset": item.text(1),
+                        }
+                    )
+        except Exception as exc:
+            QMessageBox.warning(self, "Save failed", f"Could not save batch CSV.\n\n{exc}")
+            return
+
     def add_files(self):
         start_dir = self.output_directory_edit.text().strip()
         paths, _ = QFileDialog.getOpenFileNames(self, "Select mesh files", start_dir, MESH_FILTER)
@@ -1709,8 +1787,7 @@ class SurfaceShellBatchTab(BaseOperationTab):
         for path in paths:
             if path in existing_paths:
                 continue
-            item = QTreeWidgetItem([path, default_offset, ""])
-            self.items_tree.addTopLevelItem(item)
+            self.add_item_row(path, default_offset)
             existing_paths.add(path)
 
         self.refresh_output_paths()
