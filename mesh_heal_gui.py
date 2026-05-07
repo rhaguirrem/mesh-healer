@@ -75,6 +75,13 @@ INTENDED_MESH_TYPE_OPTIONS = (
     ("Solid", "solid"),
     ("Surface", "surface"),
 )
+CSV_DELIMITER_OPTIONS = (
+    ("Auto-detect", "auto"),
+    ("Comma (,)", ","),
+    ("Semicolon (;)", ";"),
+    ("Tab (\\t)", "\t"),
+    ("Pipe (|)", "|"),
+)
 
 
 def suggest_autoresearch_output_path(input_path: Path) -> Path:
@@ -90,6 +97,15 @@ def create_intended_mesh_type_combo(default_value: str = "auto") -> QComboBox:
     for label, value in INTENDED_MESH_TYPE_OPTIONS:
         combo.addItem(label, value)
     index = combo.findData(mesh_heal.normalize_intended_mesh_type(default_value))
+    combo.setCurrentIndex(max(0, index))
+    return combo
+
+
+def create_csv_delimiter_combo(default_value: str = "auto") -> QComboBox:
+    combo = QComboBox()
+    for label, value in CSV_DELIMITER_OPTIONS:
+        combo.addItem(label, value)
+    index = combo.findData(default_value)
     combo.setCurrentIndex(max(0, index))
     return combo
 
@@ -1633,6 +1649,9 @@ class SurfaceShellBatchTab(BaseOperationTab):
         output_directory_layout.addWidget(self.output_directory_edit, 1)
         output_directory_layout.addWidget(self.output_directory_button)
 
+        self.csv_delimiter_combo = create_csv_delimiter_combo("auto")
+        self.csv_delimiter_combo.setToolTip("Choose a separator explicitly, or leave Auto-detect to infer it from the loaded CSV.")
+
         self.intended_mesh_type_combo = create_intended_mesh_type_combo("surface")
         self.merge_eps_edit = QLineEdit("1e-8")
         self.area_eps_edit = QLineEdit("1e-12")
@@ -1655,6 +1674,7 @@ class SurfaceShellBatchTab(BaseOperationTab):
         form.addRow("Default offset for new rows", self.default_offset_edit)
         form.addRow("Offset for selected rows", apply_offset_widget)
         form.addRow("Output directory", output_directory_widget)
+        form.addRow("CSV delimiter", self.csv_delimiter_combo)
         form.addRow("Intended result", self.intended_mesh_type_combo)
         form.addRow("Merge epsilon", self.merge_eps_edit)
         form.addRow("Area epsilon", self.area_eps_edit)
@@ -1688,6 +1708,7 @@ class SurfaceShellBatchTab(BaseOperationTab):
             self.apply_offset_button,
             self.output_directory_edit,
             self.output_directory_button,
+            self.csv_delimiter_combo,
             self.intended_mesh_type_combo,
             self.merge_eps_edit,
             self.area_eps_edit,
@@ -1710,6 +1731,33 @@ class SurfaceShellBatchTab(BaseOperationTab):
         item = QTreeWidgetItem([input_path, offset_text, ""])
         self.items_tree.addTopLevelItem(item)
 
+    def current_csv_delimiter(self) -> str | None:
+        value = self.csv_delimiter_combo.currentData()
+        if value == "auto":
+            return None
+        return str(value)
+
+    def set_csv_delimiter(self, delimiter: str | None) -> None:
+        value = delimiter if delimiter in {",", ";", "\t", "|"} else "auto"
+        index = self.csv_delimiter_combo.findData(value)
+        self.csv_delimiter_combo.setCurrentIndex(max(0, index))
+
+    def _build_batch_csv_reader(self, handle):
+        sample = handle.read(4096)
+        handle.seek(0)
+        reader_kwargs = {}
+        delimiter = self.current_csv_delimiter()
+        if delimiter is None:
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            except csv.Error:
+                dialect = None
+            if dialect is not None and getattr(dialect, "delimiter", None):
+                delimiter = dialect.delimiter
+        if delimiter is not None:
+            reader_kwargs["delimiter"] = delimiter
+        return csv.DictReader(handle, **reader_kwargs), delimiter
+
     def load_csv(self):
         start_dir = self.output_directory_edit.text().strip()
         csv_path, _ = QFileDialog.getOpenFileName(self, "Load batch CSV", start_dir, self.csv_filter())
@@ -1718,8 +1766,10 @@ class SurfaceShellBatchTab(BaseOperationTab):
 
         try:
             rows = []
+            detected_delimiter = None
+            default_offset = mesh_heal.format_surface_shell_offset_token(float(self.default_offset_edit.text()))
             with open(csv_path, "r", newline="", encoding="utf-8-sig") as handle:
-                reader = csv.DictReader(handle)
+                reader, detected_delimiter = self._build_batch_csv_reader(handle)
                 if reader.fieldnames is None:
                     raise ValueError("CSV file is missing a header row.")
 
@@ -1732,8 +1782,12 @@ class SurfaceShellBatchTab(BaseOperationTab):
                 for row_index, row in enumerate(reader, start=2):
                     input_path = str(row.get(path_field, "")).strip()
                     offset_text = str(row.get(offset_field, "")).strip()
+                    if not input_path and not offset_text:
+                        continue
                     if not input_path:
                         raise ValueError(f"CSV row {row_index} is missing an input path.")
+                    if not offset_text:
+                        offset_text = default_offset
                     offset_value = mesh_heal.format_surface_shell_offset_token(float(offset_text))
                     rows.append((input_path, offset_value))
         except Exception as exc:
@@ -1743,6 +1797,7 @@ class SurfaceShellBatchTab(BaseOperationTab):
         self.items_tree.clear()
         for input_path, offset_value in rows:
             self.add_item_row(input_path, offset_value)
+        self.set_csv_delimiter(detected_delimiter)
         self.refresh_output_paths()
 
     def save_csv(self):
@@ -1756,8 +1811,9 @@ class SurfaceShellBatchTab(BaseOperationTab):
             return
 
         try:
+            delimiter = self.current_csv_delimiter() or ","
             with open(csv_path, "w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["input_path", "distance_offset"])
+                writer = csv.DictWriter(handle, fieldnames=["input_path", "distance_offset"], delimiter=delimiter)
                 writer.writeheader()
                 for index in range(self.items_tree.topLevelItemCount()):
                     item = self.items_tree.topLevelItem(index)
