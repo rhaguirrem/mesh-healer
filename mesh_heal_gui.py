@@ -1294,6 +1294,7 @@ class HealTab(BaseOperationTab):
         self.distance_model_combo = QComboBox()
         self.distance_model_combo.addItem("None", "none")
         self.distance_model_combo.addItem("Distance hull", "distance-hull")
+        self.distance_model_combo.addItem("Surface shell", "surface-shell")
         self.distance_model_combo.currentIndexChanged.connect(self.update_distance_model_controls)
         self.distance_offset_edit = QLineEdit("1.0")
         self.distance_grid_spacing_edit = QLineEdit("0.0")
@@ -1459,9 +1460,16 @@ class HealTab(BaseOperationTab):
 
     def update_distance_model_controls(self, *_args):
         distance_mode = str(self.distance_model_combo.currentData())
-        enabled = distance_mode != "none"
-        self.distance_offset_edit.setEnabled(enabled)
-        self.distance_grid_spacing_edit.setEnabled(enabled)
+        uses_distance_model = distance_mode != "none"
+        uses_distance_hull = distance_mode == "distance-hull"
+        self.distance_offset_edit.setEnabled(uses_distance_model)
+        self.distance_grid_spacing_edit.setEnabled(uses_distance_hull)
+        self.distance_offset_edit.setToolTip(
+            "Per-side offset used by Distance hull and Surface shell. Surface shell offsets along mesh normals on both sides."
+        )
+        self.distance_grid_spacing_edit.setToolTip(
+            "Only used for Distance hull. Surface shell offsets the existing mesh directly and ignores grid spacing."
+        )
 
     def update_advanced_backend_controls(self, *_args):
         backend_name = str(self.advanced_backend_combo.currentData())

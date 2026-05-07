@@ -233,7 +233,7 @@ ADVANCED_HEAL_BACKENDS = ("none", "cgal-alpha-wrap", "cgal-repair")
 DEPRECATED_ADVANCED_HEAL_BACKENDS = ("omc-ftetwild", "omc-cdt")
 ALL_ADVANCED_HEAL_BACKENDS = ADVANCED_HEAL_BACKENDS + DEPRECATED_ADVANCED_HEAL_BACKENDS
 POINT_CLOUD_REBUILD_MODES = ("none", "triangle-centers-poisson")
-DISTANCE_MODEL_MODES = ("none", "distance-hull")
+DISTANCE_MODEL_MODES = ("none", "distance-hull", "surface-shell")
 INTENDED_MESH_TYPES = ("auto", "solid", "surface")
 
 AUTORESEARCH_SAMPLE_POINT_COUNT = 2048
@@ -2708,6 +2708,186 @@ def build_distance_hull(
     report["output_faces"] = int(len(hull_mesh.faces))
     report["watertight"] = bool(hull_mesh.is_watertight)
     return hull_mesh, report
+
+
+def _estimate_min_unique_edge_length(mesh: trimesh.Trimesh) -> float:
+    edges = np.asarray(mesh.edges_unique, dtype=np.int64)
+    if len(edges) == 0:
+        return 0.0
+
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    lengths = np.linalg.norm(vertices[edges[:, 1]] - vertices[edges[:, 0]], axis=1)
+    finite_lengths = lengths[np.isfinite(lengths) & (lengths > 0.0)]
+    if len(finite_lengths) == 0:
+        return 0.0
+    return float(np.min(finite_lengths))
+
+
+def _compute_surface_shell_vertex_normals(
+    mesh: trimesh.Trimesh,
+    area_eps: float,
+    fallback_scale: float,
+) -> np.ndarray:
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    if len(vertices) == 0:
+        return np.zeros((0, 3), dtype=float)
+
+    try:
+        vertex_normals = np.array(mesh.vertex_normals, dtype=float, copy=True)
+    except Exception:
+        vertex_normals = np.zeros_like(vertices)
+
+    if vertex_normals.shape != vertices.shape:
+        vertex_normals = np.zeros_like(vertices)
+
+    face_normals = np.asarray(mesh.face_normals, dtype=float)
+    accumulated = np.zeros_like(vertices)
+    for face, face_normal in zip(np.asarray(mesh.faces, dtype=np.int64), face_normals):
+        normal = np.asarray(face_normal, dtype=float)
+        length = float(np.linalg.norm(normal))
+        if not np.isfinite(length) or length <= area_eps:
+            continue
+        accumulated[face] += normal / length
+
+    accumulated_lengths = np.linalg.norm(accumulated, axis=1)
+    accumulated_valid = accumulated_lengths > max(area_eps, 1e-15)
+    if np.any(accumulated_valid):
+        vertex_normals[accumulated_valid] = accumulated[accumulated_valid] / accumulated_lengths[accumulated_valid][:, None]
+
+    lengths = np.linalg.norm(vertex_normals, axis=1)
+    invalid_mask = (~np.isfinite(vertex_normals).all(axis=1)) | (lengths <= max(area_eps, 1e-15))
+    if np.any(invalid_mask):
+        center = np.asarray(mesh.bounding_box.centroid if len(vertices) > 0 else np.zeros(3), dtype=float)
+        fallback = vertices[invalid_mask] - center
+        fallback_lengths = np.linalg.norm(fallback, axis=1)
+        usable_fallback = fallback_lengths > max(fallback_scale * 1e-9, 1e-15)
+        if np.any(usable_fallback):
+            fallback[usable_fallback] = fallback[usable_fallback] / fallback_lengths[usable_fallback][:, None]
+        if np.any(~usable_fallback):
+            fallback[~usable_fallback] = np.array([0.0, 0.0, 1.0], dtype=float)
+        vertex_normals[invalid_mask] = fallback
+        lengths = np.linalg.norm(vertex_normals, axis=1)
+
+    return vertex_normals / np.maximum(lengths[:, None], 1e-15)
+
+
+def build_surface_shell(
+    mesh: trimesh.Trimesh,
+    offset_distance: float,
+    merge_eps: float = 1e-8,
+    area_eps: float = 1e-12,
+    dedup_decimals: int = 8,
+    status_callback: StatusCallback = None,
+) -> Tuple[trimesh.Trimesh, dict]:
+    if offset_distance <= 0.0:
+        raise ValueError("Surface shell offset must be greater than zero.")
+
+    work = mesh.copy()
+    work = merge_nearby_vertices(work, merge_eps=merge_eps)
+    work = remove_duplicate_faces(work, decimals=dedup_decimals)
+    work = remove_degenerate_faces(work, eps=area_eps)
+    work.remove_unreferenced_vertices()
+    try:
+        trimesh.repair.fix_normals(work)
+    except Exception:
+        pass
+
+    boundary_loops = extract_boundary_loops(work)
+    min_edge_length = _estimate_min_unique_edge_length(work)
+    report = {
+        "mode": "surface-shell",
+        "input_vertices": int(len(mesh.vertices)),
+        "input_faces": int(len(mesh.faces)),
+        "preprocessed_vertices": int(len(work.vertices)),
+        "preprocessed_faces": int(len(work.faces)),
+        "offset_distance": float(offset_distance),
+        "boundary_loops_detected": int(len(boundary_loops)),
+        "boundary_loops_stitched": 0,
+        "stitched_side_faces": 0,
+        "min_input_edge_length": float(min_edge_length),
+        "warnings": [],
+        "assembly_validation": None,
+        "output_vertices": 0,
+        "output_faces": 0,
+        "watertight": False,
+    }
+    if len(work.faces) == 0:
+        return make_empty_mesh(), report
+
+    if min_edge_length > 0.0 and offset_distance >= min_edge_length:
+        report["warnings"].append(
+            "Offset distance is at least the minimum input edge length; sharp features may self-intersect or collapse."
+        )
+
+    emit_status(status_callback, "Computing offset skins for surface shell")
+    vertices = np.asarray(work.vertices, dtype=float)
+    faces = np.asarray(work.faces, dtype=np.int64)
+    shell_normals = _compute_surface_shell_vertex_normals(
+        work,
+        area_eps=area_eps,
+        fallback_scale=max(estimate_mesh_scale(work), merge_eps),
+    )
+    outer_vertices = vertices + (shell_normals * float(offset_distance))
+    inner_vertices = vertices - (shell_normals * float(offset_distance))
+    vertex_count = int(len(vertices))
+
+    outer_faces = faces.copy()
+    inner_faces = (faces[:, ::-1] + vertex_count).copy()
+    side_faces: List[List[int]] = []
+    for loop in boundary_loops:
+        loop_indices = [int(index) for index in np.asarray(loop, dtype=np.int64).tolist()]
+        if len(loop_indices) < 3:
+            continue
+        report["boundary_loops_stitched"] += 1
+        for edge_index in range(len(loop_indices)):
+            start = loop_indices[edge_index]
+            end = loop_indices[(edge_index + 1) % len(loop_indices)]
+            side_faces.append([start, end, end + vertex_count])
+            side_faces.append([start, end + vertex_count, start + vertex_count])
+
+    report["stitched_side_faces"] = int(len(side_faces))
+    combined_vertices = np.vstack([outer_vertices, inner_vertices])
+    face_groups = [outer_faces, inner_faces]
+    if side_faces:
+        face_groups.append(np.asarray(side_faces, dtype=np.int64))
+    combined_faces = np.vstack(face_groups)
+    shell_mesh = trimesh.Trimesh(
+        vertices=np.asarray(combined_vertices, dtype=float),
+        faces=np.asarray(combined_faces, dtype=np.int64),
+        process=False,
+    )
+    shell_mesh, assembly_validation = sanitize_intermediate_mesh(
+        shell_mesh,
+        stage="surface shell assembly",
+        merge_eps=merge_eps,
+        area_eps=area_eps,
+        dedup_decimals=dedup_decimals,
+        status_callback=status_callback,
+    )
+    report["assembly_validation"] = assembly_validation
+    shell_mesh = finalize_healed_mesh(
+        shell_mesh,
+        merge_eps=merge_eps,
+        area_eps=area_eps,
+        dedup_decimals=dedup_decimals,
+        resolve_component_overlaps=False,
+        status_callback=None,
+    )
+
+    after = mesh_report(shell_mesh, area_eps=area_eps)
+    if after.boundary_edges > 0:
+        report["warnings"].append(
+            f"Surface shell output still has {after.boundary_edges} boundary edges after stitching."
+        )
+    if after.nonmanifold_edges > 0 or after.degenerate_faces > 0 or after.duplicate_faces > 0:
+        report["warnings"].append(
+            "Surface shell output contains invalid topology; the chosen offset may have introduced self-intersections or collapsed features."
+        )
+
+    report["output_vertices"] = int(len(shell_mesh.vertices))
+    report["output_faces"] = int(len(shell_mesh.faces))
+    report["watertight"] = bool(after.watertight)
+    return shell_mesh, report
 
 
 def estimate_point_cloud_neighbor_distance(points: np.ndarray) -> float:
@@ -5893,7 +6073,7 @@ def execute_heal_strategy_on_mesh(
     use_distance_model = normalized_distance_model != "none"
     use_hint_seeded_rebuild = bool(rebuild_triangles and external_hints and (external_hints.get("issues") or []))
     if use_distance_model and distance_offset <= 0.0:
-        raise ValueError("Distance hull offset must be greater than zero when distance model generation is enabled.")
+        raise ValueError("Distance-model offset must be greater than zero when distance model generation is enabled.")
 
     extra_steps = 0
     if use_hint_seeded_rebuild:
@@ -6076,15 +6256,25 @@ def execute_heal_strategy_on_mesh(
         progress_tracker.advance()
 
     if use_distance_model:
-        mesh_out, distance_model_report = build_distance_hull(
-            mesh_for_heal,
-            offset_distance=distance_offset,
-            grid_spacing=distance_grid_spacing,
-            merge_eps=merge_eps,
-            area_eps=area_eps,
-            dedup_decimals=dedup_decimals,
-            status_callback=status_callback,
-        )
+        if normalized_distance_model == "distance-hull":
+            mesh_out, distance_model_report = build_distance_hull(
+                mesh_for_heal,
+                offset_distance=distance_offset,
+                grid_spacing=distance_grid_spacing,
+                merge_eps=merge_eps,
+                area_eps=area_eps,
+                dedup_decimals=dedup_decimals,
+                status_callback=status_callback,
+            )
+        else:
+            mesh_out, distance_model_report = build_surface_shell(
+                mesh_for_heal,
+                offset_distance=distance_offset,
+                merge_eps=merge_eps,
+                area_eps=area_eps,
+                dedup_decimals=dedup_decimals,
+                status_callback=status_callback,
+            )
         progress_tracker.advance()
     elif use_surface_return:
         emit_status(status_callback, "Returning repaired surface after watertight repair")
@@ -6849,19 +7039,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--distance-model",
         choices=list(DISTANCE_MODEL_MODES),
         default="none",
-        help="Generate a distance-field-derived hull around the current surface",
+        help="Generate either a distance-field hull or a stitched offset surface shell around the current surface",
     )
     heal_parser.add_argument(
         "--distance-offset",
         type=float,
         default=0.0,
-        help="Offset distance for the distance hull; required when --distance-model distance-hull is selected",
+        help="Offset distance for the selected distance model; required when --distance-model is not none",
     )
     heal_parser.add_argument(
         "--distance-grid-spacing",
         type=float,
         default=0.0,
-        help="Optional sampling grid spacing for distance hull generation; default 0 chooses automatically",
+        help="Optional sampling grid spacing for distance-hull generation only; default 0 chooses automatically",
     )
     heal_parser.add_argument(
         "--make-watertight",

@@ -59,6 +59,7 @@ Optional modes:
 - Experimental non-manifold edge sleeve repair.
 - Experimental localized self-intersection repair.
 - Optional distance-hull generation.
+- Optional surface-shell generation.
 - Optional watertight repair.
 - Optional CGAL Alpha Wrap fallback.
 
@@ -112,6 +113,14 @@ Distance hull:
 ```bash
 uv run python mesh_heal.py heal input.dxf distance_hull.stl --distance-model distance-hull --distance-offset 2.5 --report report.json
 ```
+
+Surface shell:
+
+```bash
+uv run python mesh_heal.py heal input_surface.obj thickened_surface.stl --distance-model surface-shell --distance-offset 2.5 --report report.json
+```
+
+`distance-hull` extracts a new enclosing iso-surface from an unsigned distance field. `surface-shell` thickens the current mesh itself by offsetting it on both sides and stitching any open boundary rims.
 
 Surface return after watertight repair:
 
