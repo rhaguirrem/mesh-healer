@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -1561,6 +1562,7 @@ class SurfaceShellBatchTab(BaseOperationTab):
     def __init__(self):
         super().__init__()
 
+        self.selected_meshes_label = QLabel("Selected meshes")
         self.items_tree = QTreeWidget()
         self.items_tree.setColumnCount(3)
         self.items_tree.setHeaderLabels(["Input mesh", "Offset", "Output file"])
@@ -1568,7 +1570,11 @@ class SurfaceShellBatchTab(BaseOperationTab):
         self.items_tree.setAlternatingRowColors(True)
         self.items_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.items_tree.setMinimumHeight(220)
-        self.items_tree.header().setStretchLastSection(True)
+        header = self.items_tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
 
         self.add_files_button = QPushButton("Add Files...")
         self.add_files_button.clicked.connect(self.add_files)
@@ -1631,7 +1637,8 @@ class SurfaceShellBatchTab(BaseOperationTab):
         options_group = QGroupBox("Batch Surface Shell")
         form = QFormLayout(options_group)
         form.addRow(note)
-        form.addRow("Selected meshes", list_body)
+        form.addRow(self.selected_meshes_label)
+        form.addRow(list_body)
         form.addRow("Default offset for new rows", self.default_offset_edit)
         form.addRow("Offset for selected rows", apply_offset_widget)
         form.addRow("Output directory", output_directory_widget)
@@ -1656,6 +1663,7 @@ class SurfaceShellBatchTab(BaseOperationTab):
         layout.addLayout(panels)
 
         self.controls = [
+            self.selected_meshes_label,
             self.items_tree,
             self.add_files_button,
             self.remove_selected_button,
@@ -3785,10 +3793,22 @@ class GuidedHealWindow(QMainWindow):
         self.resize(1680, 980)
 
         central = QWidget()
-        layout = QHBoxLayout(central)
+        layout = QVBoxLayout(central)
+
+        controls_row = QHBoxLayout()
+        controls_row.addStretch(1)
+        self.preview_toggle_button = QPushButton("Hide Preview")
+        self.preview_toggle_button.setCheckable(True)
+        self.preview_toggle_button.toggled.connect(self.toggle_preview_panel)
+        controls_row.addWidget(self.preview_toggle_button)
+        layout.addLayout(controls_row)
 
         self.preview_pane = PreviewPane()
         self.preview_pane.setMinimumWidth(520)
+        self.preview_container = QWidget()
+        preview_layout = QVBoxLayout(self.preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.addWidget(self.preview_pane)
 
         tabs = QTabWidget()
         tabs.addTab(HealTab(self.preview_pane), "Heal")
@@ -3796,9 +3816,22 @@ class GuidedHealWindow(QMainWindow):
         tabs.addTab(BooleanTab(self.preview_pane), "Boolean")
         tabs.setCurrentIndex(0)
 
-        layout.addWidget(tabs, 3)
-        layout.addWidget(self.preview_pane, 2)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.addWidget(tabs)
+        self.main_splitter.addWidget(self.preview_container)
+        self.main_splitter.setChildrenCollapsible(True)
+        self.main_splitter.setSizes([1040, 640])
+        layout.addWidget(self.main_splitter, 1)
         self.setCentralWidget(central)
+
+    def toggle_preview_panel(self, collapsed: bool):
+        self.preview_container.setVisible(not collapsed)
+        if collapsed:
+            self.preview_toggle_button.setText("Show Preview")
+            self.main_splitter.setSizes([1, 0])
+        else:
+            self.preview_toggle_button.setText("Hide Preview")
+            self.main_splitter.setSizes([1040, 640])
 
 
 def main() -> None:
