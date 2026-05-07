@@ -317,6 +317,23 @@ def derive_healed_output_path(input_path: Path) -> Path:
     return input_path.with_name(f"{input_path.stem}_healed.msh")
 
 
+def format_surface_shell_offset_token(offset_distance: float) -> str:
+    offset = float(offset_distance)
+    if not math.isfinite(offset) or offset <= 0.0:
+        raise ValueError("Surface-shell batch offset must be a finite value greater than zero.")
+    return format(offset, "g")
+
+
+def derive_surface_shell_output_path(
+    input_path: Path,
+    offset_distance: float,
+    output_directory: Optional[Path] = None,
+) -> Path:
+    base_directory = Path(output_directory) if output_directory is not None else input_path.parent
+    suffix = format_surface_shell_offset_token(offset_distance)
+    return base_directory / f"{input_path.stem}_buffer_{suffix}.dxf"
+
+
 def normalize_advanced_heal_backend(backend: str) -> str:
     backend_name = backend.lower().strip()
     if backend_name in DEPRECATED_ADVANCED_HEAL_BACKENDS:
@@ -6466,6 +6483,80 @@ def run_heal_pipeline(
     }
     write_json_report(report, report_path)
     return report
+
+
+def run_surface_shell_batch_pipeline(
+    items: Sequence[dict],
+    output_directory: Optional[Path] = None,
+    intended_mesh_type: str = "surface",
+    merge_eps: float = 1e-8,
+    area_eps: float = 1e-12,
+    dedup_decimals: int = 8,
+    status_callback: StatusCallback = None,
+    progress_callback: ProgressCallback = None,
+) -> dict:
+    if not items:
+        raise ValueError("At least one input mesh is required for batch surface-shell generation.")
+
+    normalized_output_directory = Path(output_directory) if output_directory is not None else None
+    if normalized_output_directory is not None:
+        normalized_output_directory.mkdir(parents=True, exist_ok=True)
+
+    total_items = len(items)
+    emit_progress(progress_callback, 0, total_items)
+    results = []
+    for index, item in enumerate(items, start=1):
+        input_path = Path(item["input_path"])
+        offset_distance = float(item["distance_offset"])
+        output_path = Path(item.get("output_path") or derive_surface_shell_output_path(
+            input_path,
+            offset_distance,
+            output_directory=normalized_output_directory,
+        ))
+
+        emit_status(
+            status_callback,
+            f"[{index}/{total_items}] Generating surface shell for {input_path.name} with offset {format_surface_shell_offset_token(offset_distance)}",
+        )
+        report = run_heal_pipeline(
+            input_path=input_path,
+            output_path=output_path,
+            report_path=None,
+            external_hint_path=None,
+            intended_mesh_type=intended_mesh_type,
+            merge_eps=merge_eps,
+            area_eps=area_eps,
+            dedup_decimals=dedup_decimals,
+            rebuild_triangles=False,
+            nonmanifold_edge_repair=False,
+            nonmanifold_edge_radius=0.0,
+            localized_intersection_repair=False,
+            point_cloud_rebuild="none",
+            distance_model="surface-shell",
+            distance_offset=offset_distance,
+            distance_grid_spacing=0.0,
+            make_watertight=False,
+            return_surface_after_watertight=False,
+            advanced_backend="none",
+            status_callback=status_callback,
+            progress_callback=None,
+        )
+        results.append(
+            {
+                "input": str(input_path),
+                "output": str(output_path),
+                "distance_offset": offset_distance,
+                "report": report,
+            }
+        )
+        emit_progress(progress_callback, index, total_items)
+
+    return {
+        "mode": "surface-shell-batch",
+        "item_count": total_items,
+        "output_directory": str(normalized_output_directory) if normalized_output_directory is not None else None,
+        "results": results,
+    }
 
 
 def run_autoresearch_pipeline(

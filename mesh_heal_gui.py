@@ -14,6 +14,7 @@ os.environ.setdefault("QT_OPENGL", "software")
 from PySide6.QtCore import QObject, QPointF, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -1554,6 +1555,234 @@ class HealTab(BaseOperationTab):
 
         self.healed_output_ready = False
         self.start_worker(mesh_heal.run_heal_pipeline, kwargs)
+
+
+class SurfaceShellBatchTab(BaseOperationTab):
+    def __init__(self):
+        super().__init__()
+
+        self.items_tree = QTreeWidget()
+        self.items_tree.setColumnCount(3)
+        self.items_tree.setHeaderLabels(["Input mesh", "Offset", "Output file"])
+        self.items_tree.setRootIsDecorated(False)
+        self.items_tree.setAlternatingRowColors(True)
+        self.items_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.items_tree.setMinimumHeight(220)
+        self.items_tree.header().setStretchLastSection(True)
+
+        self.add_files_button = QPushButton("Add Files...")
+        self.add_files_button.clicked.connect(self.add_files)
+        self.remove_selected_button = QPushButton("Remove Selected")
+        self.remove_selected_button.clicked.connect(self.remove_selected)
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.clicked.connect(self.clear_items)
+
+        list_buttons = QWidget()
+        list_buttons_layout = QVBoxLayout(list_buttons)
+        list_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        list_buttons_layout.addWidget(self.add_files_button)
+        list_buttons_layout.addWidget(self.remove_selected_button)
+        list_buttons_layout.addWidget(self.clear_button)
+        list_buttons_layout.addStretch(1)
+
+        list_body = QWidget()
+        list_body_layout = QHBoxLayout(list_body)
+        list_body_layout.setContentsMargins(0, 0, 0, 0)
+        list_body_layout.addWidget(self.items_tree, 1)
+        list_body_layout.addWidget(list_buttons)
+
+        self.default_offset_edit = QLineEdit("1.0")
+        self.apply_offset_edit = QLineEdit("1.0")
+        self.apply_offset_button = QPushButton("Apply To Selected")
+        self.apply_offset_button.clicked.connect(self.apply_selected_offset)
+
+        apply_offset_widget = QWidget()
+        apply_offset_layout = QHBoxLayout(apply_offset_widget)
+        apply_offset_layout.setContentsMargins(0, 0, 0, 0)
+        apply_offset_layout.addWidget(self.apply_offset_edit)
+        apply_offset_layout.addWidget(self.apply_offset_button)
+
+        self.output_directory_edit = QLineEdit()
+        self.output_directory_edit.setPlaceholderText("Optional. Leave empty to write next to each input mesh.")
+        self.output_directory_edit.textChanged.connect(self.refresh_output_paths)
+        self.output_directory_button = QPushButton("Browse...")
+        self.output_directory_button.clicked.connect(self.choose_output_directory)
+
+        output_directory_widget = QWidget()
+        output_directory_layout = QHBoxLayout(output_directory_widget)
+        output_directory_layout.setContentsMargins(0, 0, 0, 0)
+        output_directory_layout.addWidget(self.output_directory_edit, 1)
+        output_directory_layout.addWidget(self.output_directory_button)
+
+        self.intended_mesh_type_combo = create_intended_mesh_type_combo("surface")
+        self.merge_eps_edit = QLineEdit("1e-8")
+        self.area_eps_edit = QLineEdit("1e-12")
+        self.dedup_spin = QSpinBox()
+        self.dedup_spin.setRange(0, 16)
+        self.dedup_spin.setValue(8)
+        self.run_button = QPushButton("Run Batch Surface Shell")
+        self.run_button.clicked.connect(self.run_task)
+
+        note = QLabel(
+            "Add multiple mesh files, assign each row its own per-side offset, and the batch runner will generate DXF outputs named with the pattern name_buffer_offset.dxf. The output directory is optional; when blank, each file is written beside its source mesh."
+        )
+        note.setWordWrap(True)
+
+        options_group = QGroupBox("Batch Surface Shell")
+        form = QFormLayout(options_group)
+        form.addRow(note)
+        form.addRow("Selected meshes", list_body)
+        form.addRow("Default offset for new rows", self.default_offset_edit)
+        form.addRow("Offset for selected rows", apply_offset_widget)
+        form.addRow("Output directory", output_directory_widget)
+        form.addRow("Intended result", self.intended_mesh_type_combo)
+        form.addRow("Merge epsilon", self.merge_eps_edit)
+        form.addRow("Area epsilon", self.area_eps_edit)
+        form.addRow("Dedup decimals", self.dedup_spin)
+        form.addRow(self.run_button)
+
+        self.create_status_widgets()
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(options_group)
+        layout.addWidget(QLabel("Status"))
+        layout.addWidget(self.progress_bar)
+
+        panels = QGridLayout()
+        panels.addWidget(QLabel("Log"), 0, 0)
+        panels.addWidget(QLabel("Summary"), 0, 1)
+        panels.addWidget(self.log_view, 1, 0)
+        panels.addWidget(self.summary_view, 1, 1)
+        layout.addLayout(panels)
+
+        self.controls = [
+            self.items_tree,
+            self.add_files_button,
+            self.remove_selected_button,
+            self.clear_button,
+            self.default_offset_edit,
+            self.apply_offset_edit,
+            self.apply_offset_button,
+            self.output_directory_edit,
+            self.output_directory_button,
+            self.intended_mesh_type_combo,
+            self.merge_eps_edit,
+            self.area_eps_edit,
+            self.dedup_spin,
+            self.run_button,
+        ]
+
+    def choose_output_directory(self):
+        start_dir = self.output_directory_edit.text().strip()
+        if not start_dir and self.items_tree.topLevelItemCount() > 0:
+            start_dir = str(Path(self.items_tree.topLevelItem(0).text(0)).parent)
+        directory = QFileDialog.getExistingDirectory(self, "Select output directory", start_dir)
+        if directory:
+            self.output_directory_edit.setText(directory)
+
+    def add_files(self):
+        start_dir = self.output_directory_edit.text().strip()
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select mesh files", start_dir, MESH_FILTER)
+        if not paths:
+            return
+
+        existing_paths = {self.items_tree.topLevelItem(index).text(0) for index in range(self.items_tree.topLevelItemCount())}
+        try:
+            default_offset = mesh_heal.format_surface_shell_offset_token(float(self.default_offset_edit.text()))
+        except ValueError:
+            QMessageBox.warning(self, "Invalid offset", "Default offset must be a number greater than zero.")
+            return
+
+        for path in paths:
+            if path in existing_paths:
+                continue
+            item = QTreeWidgetItem([path, default_offset, ""])
+            self.items_tree.addTopLevelItem(item)
+            existing_paths.add(path)
+
+        self.refresh_output_paths()
+
+    def remove_selected(self):
+        for item in list(self.items_tree.selectedItems()):
+            row = self.items_tree.indexOfTopLevelItem(item)
+            if row >= 0:
+                self.items_tree.takeTopLevelItem(row)
+
+    def clear_items(self):
+        self.items_tree.clear()
+
+    def apply_selected_offset(self):
+        selected_items = self.items_tree.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "Missing selection", "Select at least one row before applying an offset.")
+            return
+
+        try:
+            offset_value = mesh_heal.format_surface_shell_offset_token(float(self.apply_offset_edit.text()))
+        except ValueError:
+            QMessageBox.warning(self, "Invalid offset", "Offset must be a number greater than zero.")
+            return
+
+        for item in selected_items:
+            item.setText(1, offset_value)
+        self.refresh_output_paths()
+
+    def refresh_output_paths(self, *_args):
+        output_directory_text = self.output_directory_edit.text().strip()
+        output_directory = Path(output_directory_text) if output_directory_text else None
+        for index in range(self.items_tree.topLevelItemCount()):
+            item = self.items_tree.topLevelItem(index)
+            input_path = Path(item.text(0))
+            try:
+                offset_value = float(item.text(1))
+                output_path = mesh_heal.derive_surface_shell_output_path(
+                    input_path,
+                    offset_value,
+                    output_directory=output_directory,
+                )
+            except ValueError:
+                output_path = Path("Invalid offset")
+            item.setText(2, str(output_path))
+
+    def run_task(self):
+        if self.items_tree.topLevelItemCount() == 0:
+            QMessageBox.warning(self, "Missing input", "Add at least one mesh file to the batch list.")
+            return
+
+        try:
+            items = []
+            for index in range(self.items_tree.topLevelItemCount()):
+                item = self.items_tree.topLevelItem(index)
+                input_path = Path(item.text(0))
+                offset_value = float(item.text(1))
+                output_path = Path(item.text(2))
+                if offset_value <= 0.0:
+                    raise ValueError
+                items.append(
+                    {
+                        "input_path": input_path,
+                        "distance_offset": offset_value,
+                        "output_path": output_path,
+                    }
+                )
+
+            kwargs = {
+                "items": items,
+                "output_directory": Path(self.output_directory_edit.text()) if self.output_directory_edit.text().strip() else None,
+                "intended_mesh_type": str(self.intended_mesh_type_combo.currentData()),
+                "merge_eps": float(self.merge_eps_edit.text()),
+                "area_eps": float(self.area_eps_edit.text()),
+                "dedup_decimals": int(self.dedup_spin.value()),
+            }
+        except ValueError:
+            QMessageBox.warning(
+                self,
+                "Invalid numeric input",
+                "Every batch offset must be greater than zero, and merge epsilon plus area epsilon must be valid numbers.",
+            )
+            return
+
+        self.start_worker(mesh_heal.run_surface_shell_batch_pipeline, kwargs)
 
 
 class AutoresearchTab(BaseOperationTab):
@@ -3537,6 +3766,7 @@ class ToolPanelWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(EditToolTab(editor), "Edit")
         tabs.addTab(HealTab(None), "Heal")
+        tabs.addTab(SurfaceShellBatchTab(), "Surface Shell Batch")
         tabs.addTab(AutoresearchTab(None), "Autoresearch")
         tabs.addTab(BooleanTab(None), "Boolean")
         tabs.setCurrentIndex(0)
@@ -3562,6 +3792,7 @@ class GuidedHealWindow(QMainWindow):
 
         tabs = QTabWidget()
         tabs.addTab(HealTab(self.preview_pane), "Heal")
+        tabs.addTab(SurfaceShellBatchTab(), "Surface Shell Batch")
         tabs.addTab(BooleanTab(self.preview_pane), "Boolean")
         tabs.setCurrentIndex(0)
 
